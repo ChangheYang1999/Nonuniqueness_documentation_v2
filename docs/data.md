@@ -1,0 +1,278 @@
+# Data Dictionary
+
+`data/external/` contains imported candidate coefficients. `data/generated/` is the
+notebook output/cache directory. Steps 1–4 produce intermediate artifacts; Steps 5 and 6
+also save verification matrices. Step 7, `verify_auxiliary_field_bound.ipynb`, reads matched
+Step 6 matrices, prints and asserts `M5_v_upper`, and writes no result file. The [workflow](notebooks.md) distinguishes actual assertions,
+printed values and their paper counterparts; the [notation map](paper_code_map.md) defines
+the mathematical quantities.
+
+## Input coefficient files
+
+Dimensions below are MATLAB coefficient dimensions; raw HDF5 tools may display reversed axes.
+`shape` records evaluation-grid point counts, not coefficient counts.
+
+| Input under `data/external/` | u1/u3/p | u2 | Scale / evaluation shape | Role |
+|---|---|---|---|---|
+| `UP.mat` | 600×300 | 601×300 | 22 / [4097,2049] | Raw approximate background |
+| `up_eig.mat` | 300×150 | 301×150 | 22 / [4097,2049] | Raw eigenpair candidate |
+| `phi_even/UP_phi_0.mat` … `UP_phi_17.mat` | 300×150 each | 301×150 | 22 / [4097,2049] | 18 even raw inverse trials |
+| `phi_odd/up_phi_0.mat` … `up_phi_24.mat` | 300×150 each | 301×150 | 22 / [4097,2049] | 25 odd raw inverse trials |
+| `up_w.mat` | 300×150 | 301×150 | 22 / [4097,2049] | Arbitrary weighted-functional trial |
+
+The tensor Q and retained spectral coefficient matrices have different layouts,
+documented below. The notebooks derive their ranks and truncation sizes from these arrays.
+
+## Coordinate and storage conventions
+
+**Physical frame.** Use one physical spherical-component Q throughout. The angular table
+represents $H_l=-S_l'$, and the stored Bessel poloidal X radial channel contains the
+compensating minus sign. Thus reconstruction gives physical components and the zero mode
+$(\cos\theta,-\sin\theta,0)=e_z$. Do not conjugate Q by D or flip A12/A23 on loading.
+The toroidal whole-mode sign belongs to the coefficient/basis normalization, not a new
+physical tensor frame. See [the basis convention](technical_notes/bessel_basis.md).
+
+**Interval storage.** `save_matrix` writes interval scalars/arrays as `_lo`/`_hi` Float64
+endpoint fields; `read_matrix` reconstructs intervals, or midpoints in Float64 mode.
+An unsuffixed direct key takes precedence if it coexists with endpoint keys. The checkout
+mixes classic MAT and HDF5-backed v7.3 files; use the documented loader contracts.
+
+Input coefficient arrays define the approximate fields. Their residual and norm bounds
+are calculated by the notebooks. Generated integrals and Gram entries include the
+quadrature and rounding allowances described in the [pipeline guide](notebooks.md).
+Reuse generated files only with the same inputs, ordering, coordinate scale and numerical
+settings; see [cache dependencies](notebooks.md#cache-dependencies).
+
+## Data flow
+
+| Direct input | Direct readers |
+|---|---|
+| external UP | Step 1; Step 4B reads only `scl_fac` |
+| external Q | Steps 1, 4A and 4B |
+| external eig | Steps 4A, 4B, 5, 6 and 7 |
+| external up_eig | Step 2 |
+| external even trials | Step 5 |
+| external odd trials | Step 6 loads fields; Step 7 reads only their `lambda` multipliers |
+| external up_w | Step 7 |
+| generated UP_divfree | Steps 2, 5, 6 and 7 |
+| generated up_eig_corrected | Steps 5, 6 and 7 |
+| generated bessel_zeros | Steps 4A/4B generation branches |
+| generated Q_bound_radial | Step 4B generation branch |
+| generated RHS samples/bounds | Steps 5, 6 and 7 |
+| generated step6_odd_matrices_clean | Step 7 reads `GQ,GR,t,b` |
+
+Steps 5, 6 and 7 inherit Q/root dependencies through matched RHS
+caches; they do not load those inputs directly. Part 4B reads retained external eigenvectors
+independently of Part 4A's caches, but the final proof requires Part 4A's successful
+certification of the same objects. Steps 5 and 6 do not read one another's result files;
+Step 7 requires Step 6's complete raw residual Gram and pairings.
+
+## `data/generated/bessel_zeros.mat`
+
+Step 3 writes `Y_zeros` and `Z_zeros` as endpoint matrices after successful enumeration,
+without an existence guard. Rows index degree; trailing zeros pad shorter root lists.
+The first Y entry is the separate constant zero mode. `mat_to_lst` restores per-degree lists.
+Only Step 4A/4B read these tables directly, using `load_besselj_zeros` when generation runs.
+
+The matrix dimensions follow the number of roots found in each degree. Trailing zeros
+are padding rather than roots. The search and the degree cutoff are explained in the
+[complete-root argument](technical_notes/bessel_zeros_certificate.md).
+
+## `data/external/UP.mat`
+
+`u1,u2,u3,p` are frequency coefficients of the compactified velocity/pressure representation.
+The scale is $\kappa=22$ in $r_{phys}=\kappa\tan\beta$; physical velocity and pressure include
+their cosine factor. The loader reconstructs divergence-free `u2` unless `divfree=true`
+skips that step. This is an imported candidate, not generated by the seven notebooks.
+
+**Related output — `data/generated/UP_divfree.mat`:** Step 1 saves the reconstructed profile
+unconditionally, before its residual and spectral assertions. It stores coefficients,
+scale, conversion data and evaluation shape; no lambda is added. Downstream readers
+are listed above.
+
+## `data/external/approx_Q.mat`
+
+| Field / metadata | Installed value or layout | Meaning |
+|---|---|---|
+| `A11,A12,A13,A22,A23,A33` | Six 300×150 arrays | Physical symmetric tensor components |
+| Radial / angular descriptors | Radial `10`; angular `11,00,01,11,10,11` | Native trigonometric representation in component order |
+| `scl_fac` | 1 | Native scale, distinct from profile scale 22 |
+| `physical_radius` | 32 | Support radius R |
+| `shape` | [4097,2049] | Evaluation shape metadata |
+| `cosine_identity_lift` | 0.00022 | Recorded identity lift |
+| `lift_included_in_coefficients` | 1 | Already included; do not add it again |
+
+`load_grad_U` reads the six physical components without DQD. Q is the compact compensator,
+not `sym(grad U)`. Step 1 verifies Q≥0, its norm and the compensation inequality.
+The native argument is $x_Q=(\pi/2)s$ with $s=r_{phys}/R$.
+
+**Related output — `data/generated/approx_Q.mat`:** This sampled cache is distinct from
+the external coefficient file. Step 1
+creates it only when absent; otherwise it loads spatial samples. At current settings,
+each component has 24031×6031 points: 24000×6000 intervals plus 15 ghost layers on each
+side. Rebuild the cache if Q, its scale, the grid or the arithmetic mode changes.
+
+## `data/generated/Q_bound_radial.mat`
+
+Step 1 writes logical `Q_WkInf`, split into endpoint arrays of shape `(13,6)` at `k=10`.
+Rows bound orders 0–12 in normalized radius s, columns follow the six Q components.
+The function differentiated is `Q((Pi/2)*s,theta)`. Packing occurs before `r_to_beta`.
+Step 4B consumes orders 0–10 and transforms once under $s=(\kappa/R)\tan\beta$.
+This file stores normalized-radius derivatives; the beta conversion belongs to Step 4B.
+
+## `data/external/eig.mat`
+
+| Field | Installed MATLAB shape | Meaning |
+|---|---|---|
+| `eig_val_even` | (18,1) | Retained even generalized eigenvalues |
+| `eig_vec_even` | (1257,18) | Even coordinate columns |
+| `eig_val_odd` | (25,1) | Retained odd generalized eigenvalues |
+| `eig_vec_odd` | (1260,25) | Odd coordinate columns |
+
+These externally supplied approximate generalized eigenpairs are not the physical unstable
+eigenpair. Rows use the corrected packed physical Bessel basis: coupled poloidal Y/X
+modes followed by toroidal modes, with the specified whole-mode signs. Step 4A certifies
+the columns; Step 4B reconstructs them and their forcing. Mode axes must stay aligned.
+
+The loading path is `data/external/eig.mat`.
+
+## `data/external/up_eig.mat`
+
+The raw candidate has the dimensions in the inventory and lambda
+`−0.11316095052362504` in the stationary elliptic convention. This is a candidate parameter,
+not Step 2's corrected interval. `from_mat_file(path,1)` returns the field and lambda.
+The recorded `p_radial_basis="sine_even"` is descriptive: boundary set 1 fixes the loader's
+pressure descriptor `["00","10"]`, with terms `sin(2*j*beta) cos((2*k-1)*theta)` for every
+column. Pressure stays in its Fourier angular basis; velocity receives Legendre conversion.
+
+**Related output — `data/generated/up_eig_corrected.mat`:** Step 2 divides velocity and
+pressure by the same interval enclosing the exact physical L² norm and exports corrected
+lambda. It writes only if absent, so a new successful calculation can leave an old export
+in place. Steps 5, 6 and 7 use it with `divfree=true` to preserve the common
+normalization. The coefficients, lambda, scale and conversion data use endpoint fields;
+shape records the evaluation grid. The export encloses the common normalized velocity
+and pressure used in the subsequent calculations.
+
+<a id="dataexternalup_wmat-and-dataexternalup_wcsmat"></a>
+
+## `data/external/up_w.mat`
+
+The weighted-functional trial has lambda `−2.522211673781589`, eta metadata
+`0.2318679797057152`, and the sizes/scale in the input table. Step 7 chooses mass weight `eta_v=0.23187`
+and estimates the residual of this trial. Its stored multiplier is used directly.
+
+Step 7 reads inverse multipliers
+and matched Step 6 matrices, selects fixed binary source centers and adds a separate
+interval source-error allowance. It projects the trial velocity relative to the
+exactly unit v and prints/asserts `M5_v_upper`. It does not recompute direct source
+pairings against sampled inverse fields. The exact formula is in the
+[notation map](paper_code_map.md#direct-mass-weighted-m5).
+
+<a id="dataexternalphi_evenup_phi_0mat--up_phi_18mat-19-files"></a>
+
+## `data/external/phi_even/UP_phi_0.mat` … `UP_phi_17.mat` (18 files)
+
+Write $\Phi_j$ for each raw loaded, divergence-free even trial. The manuscript inverse
+field is $\phi_j^U=-\Phi_j^U$; the stored column is not directly the manuscript phi.
+The finite-rank operator therefore has the sign described in the [notation map](paper_code_map.md).
+Files use scale 22, shape [4097,2049], and recorded even pressure convention
+`cosine_odd`. Step 5 bounds their residuals, operator norms and nonlinear aggregates.
+
+<a id="dataexternalphi_oddup_phi_0mat--up_phi_23mat-24-files"></a>
+
+## `data/external/phi_odd/up_phi_0.mat` … `up_phi_24.mat` (25 files)
+
+The manuscript odd inverse field is $\phi_j^v=-P_v\Phi_j^v$, where
+$P_v=I-v\otimes v$ for the distinguished exactly unit v. Current Step 6 integrates raw
+trials, then projects mass/gradient/cross Grams late and counts the eigenfunction-defect
+residual correction once.
+
+Each stored lambda is a trial constraint multiplier. Headers include `normalization`, `pressure_boundary`
+and `p_radial_basis` metadata; u1_AT/u2_AT are absent. Pressure uses the fixed odd descriptor
+`["00","10"]` for all columns. Step 6 reads the fields; Step 7 reads
+their `lambda` entries and obtains residual/forcing Grams and pairings from Step 6.
+
+## `data/generated/rhs.mat`
+
+Step 4B produces the matched RHS samples/bounds for Steps 5, 6 and 7.
+Logical `rhs_even` and `rhs_odd` have shape `(12021,6021,J,3)` at the current production grid:
+beta, theta, retained mode, component. They store $wQ\psi_j$, with
+$w=\sin\beta/\cos^2\beta$, and **no division by the retained eigenvalue** $\nu_j$.
+Consumers form forcing columns $Q\psi_j/\nu_j$ and corresponding scaled residuals as required.
+These eigenvalues are distinct from the unstable eigenvalue.
+
+The producer weights the 25-layer samples before cropping 15 layers. Ten layers remain
+for order-eight refinement and are removed only before physical quadrature. This stage
+adds no separate $4\pi R^3$ factor. Consumers must not apply w twice.
+
+Step 7 selects the full 12000×6000 physical grid with
+`[11:12011,11:6011,:,:]`, combines odd modes with fixed-center interval `cs ./ nu`, and uses
+`abs(cs[j]/nu[j])` with the matching derivative bounds.
+
+## `data/generated/rhs_bound.mat`
+
+| Logical field | Layout | Meaning |
+|---|---|---|
+| `rhs_bound_even`, `rhs_bound_odd` | (3,9,2,J) | Component, order 0–8, direction (beta,theta), mode |
+| `rhs_prior_even`, `rhs_prior_odd` | (3,J,11,1) | Component, mode, beta order 0–10, singleton block |
+
+The priors combine weight, once-transformed Q and refined psi bounds on the common
+10-layer domain. Psi refinement uses padding 25 through order ten; RHS refinement uses
+padding 10 through order eight and angular ceiling 410 for the configured input/basis.
+Use both files from the same eigenvectors, Q, roots, scale, radius and grid. If both
+exist, Part 4B skips generation. Otherwise it computes both before saving.
+
+## `data/generated/integrate_θ_result.mat`
+
+When the A/B cache is absent, Step 4A loads logical `result_even` and `result_odd` if the
+angular cache exists; otherwise it computes and saves them. When A/B exists, both
+angular-cache reading and angular assembly are skipped. Axes are radial sample,
+two angular degrees and two component channels. Dimensions follow the radial grid and
+the complete basis. Rebuild this cache when Q or the basis changes.
+
+## `data/generated/psi_eig_mat_AB.mat`
+
+Logical `A_even,A_odd,B_even,B_odd` are square physical matrices on the raw basis. Their
+orders match the retained coefficient rows (1257/1260 for the supplied eig input).
+For raw basis modes $b_i$,
+
+$$
+A_{ij}=\langle b_i,Qb_j\rangle,\qquad
+B_{ij}=\delta_{ij}\left(\eta_2+\alpha_i^2/R^2\right)\|b_i\|_2^2.
+$$
+
+The retained fields are linear combinations of these raw modes; see the notation map.
+Natural Stokes boundary conditions justify the diagonal energy identity. Step 4A assembles,
+enlarges by quadrature allowances and applies physical $4\pi R^3$ scaling once. An existing
+cache bypasses assembly; do not scale or enlarge it again. Matrices and Q use the same
+physical components. See [the derivation](technical_notes/finite_rank_assembly.md).
+
+## Saved inverse-verification matrices
+
+| Artifact / producer | Logical keys | Meaning |
+|---|---|---|
+| `step5_even_matrices.mat` / Step 5 | `GQ,GR,G_phi,G_Dphi,GF` | Forcing, raw residual, inverse mass/gradient and mixed-forcing Grams |
+| Same | `inpd_tensor,N,phi_grad,phi_product,K7_U` | Convection contractions, aggregates and residual trace bound |
+| `step6_odd_matrices_clean.mat` / Step 6 | `GQ,GR,G_BR,G_Bphi,G_phi,G_Dphi` | Raw Grams and forcing/residual or forcing/field crosses |
+| Same | `G_Bphi_proj,G_phi_proj,G_Dphi_proj` | Late-projected cross, mass and gradient matrices |
+| Same | `b,d,d0,t` | Projection pairings; b,d,t are J×1 and d0 is 1×1 |
+| Same | `K7_v_correction,K7_v,Bquad_v` | One projection allowance and targets saved after their assertions |
+
+Both files are under `data/generated/`. The inline A0/A1/B0 thresholds, Step 5's
+C_U threshold and the Theta_F_U scalar are not saved as fields. `GF` retains the
+mixed-forcing Gram from which the last scalar is calculated.
+
+Step 6 does not read Step 5's output. Step 7 reads
+`GQ,GR,t,b` from `step6_odd_matrices_clean.mat`: GQ is the Gram of
+`B_j=Q*psi_j/nu_j`, GR includes both spatial regions, and
+`t_j=<B_j,v>`, `b_j=<v,Phi_j>`. It also reads each raw odd trial's `lambda` to form
+`cs_base=lambda_phi-nu.*t`. The fixed binary centers are `mid.(cs_base)`; the
+interval radii, residual Gram trace and `epsilon_v=4.808e-6` projection term
+supply a separate source allowance. The inverse multipliers and saved Grams must
+refer to the same trials, normalized v, background, scale and ordered eigenbasis.
+The inner checkpoint cannot replace the complete Step 6 file.
+
+Step 7 prints `M5_v_upper` and asserts the `14.9512` threshold at mass weight `0.23187`;
+it writes no result file. This supplies the paper's relaxed bound $M_5^v\le15$.
+The [quantity map](paper_code_map.md#direct-mass-weighted-m5) specifies the source-error
+allowance, and the [workflow](notebooks.md) lists the physical grids.
